@@ -2,13 +2,20 @@ import mongoose from 'mongoose';
 
 export async function connectDB() {
   try {
-    const mongoUri = process.env.MONGODB_URI || 'mongodb://localhost:27017/ludo-game';
     const isProd = process.env.NODE_ENV === 'production';
-    const connectOptions: mongoose.ConnectOptions = isProd ? {} : {
-      // Relax TLS for local development if Atlas TLS causes handshake issues
+    const envMongoUri = process.env.MONGODB_URI;
+
+    if (isProd && !envMongoUri) {
+      throw new Error('MONGODB_URI environment variable is required in production');
+    }
+
+    const mongoUri = envMongoUri || 'mongodb://localhost:27017/ludo-game';
+    const usingAtlas = mongoUri.includes('mongodb.net');
+    const connectOptions: mongoose.ConnectOptions = !isProd && usingAtlas ? {
+      // Relax TLS only for local development against Atlas to avoid dev cert issues.
       tls: true,
       tlsAllowInvalidCertificates: true,
-    } as mongoose.ConnectOptions;
+    } as mongoose.ConnectOptions : {};
 
     try {
       await mongoose.connect(mongoUri, connectOptions);
@@ -36,8 +43,10 @@ export async function connectDB() {
 
 export async function disconnectDB() {
   try {
-    await mongoose.disconnect();
-    console.log('MongoDB disconnected');
+    if (mongoose.connection.readyState !== 0) {
+      await mongoose.disconnect();
+      console.log('MongoDB disconnected');
+    }
   } catch (error) {
     console.error('MongoDB disconnection error:', error);
   }
