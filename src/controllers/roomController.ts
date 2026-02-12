@@ -4,6 +4,17 @@ import { PlayerColor, Token, PLAYER_COLOR_MAPS, ALL_PLAYER_COLORS, getGameConfig
 import { findValidMoves, applyMove, checkWinCondition, advanceTurn as advanceGameTurn } from "../services/ludoGameLogicBackend";
 import { generateRoomCode, formatErrorResponse, formatSuccessResponse } from "../utils/helpers";
 import { emitRoomUpdate } from "../socket";
+import { gameStateCache } from "../state/gameStateCache";
+import { invalidateRoomPlayers } from "../state/roomPlayersCache";
+import { generateDiceValue, reportDiceOutcome } from "../game-logic/engagement-engine";
+
+const PERF_DEBUG = process.env.GAME_PERF_DEBUG === "true";
+const perfNow = () => Date.now();
+const logPerf = (label: string, start: number, extra?: Record<string, unknown>) => {
+  if (!PERF_DEBUG) return;
+  const tookMs = perfNow() - start;
+  console.log(`[perf] ${label} tookMs=${tookMs}`, extra || {});
+};
 
 // Helper to get Mongoose models safely
 const Room = () => mongoose.model('Room');
@@ -35,6 +46,26 @@ const getCurrentIndex = (room: any, orderedPlayers: any[]) => {
   return Math.min(Math.max(fallback, 0), Math.max(orderedPlayers.length - 1, 0));
 };
 
+const getTeammateColor = (maxPlayers: number, color: PlayerColor): PlayerColor | null => {
+  const order = getColorOrder(maxPlayers);
+  if (order.length < 4 || order.length % 2 !== 0) return null;
+  const idx = order.indexOf(color);
+  if (idx === -1) return null;
+  const partnerIdx = (idx + order.length / 2) % order.length;
+  return order[partnerIdx] || null;
+};
+
+const getControllableColors = (
+  mode: "individual" | "team",
+  maxPlayers: number,
+  color: PlayerColor
+): PlayerColor[] => {
+  if (mode !== "team") return [color];
+  const teammate = getTeammateColor(maxPlayers, color);
+  if (!teammate || teammate === color) return [color];
+  return [color, teammate];
+};
+
 /* ============================================================
    ROOM LIFECYCLE
 ============================================================ */
@@ -44,6 +75,15 @@ export async function createRoom(req: Request, res: Response) {
     if (!userId) return res.status(401).json(formatErrorResponse("Unauthorized"));
 
     const { maxPlayers = 4, mode = "individual", visibility = "public", selectedColor } = req.body;
+    if (!Number.isInteger(maxPlayers) || maxPlayers < 2 || maxPlayers > 6) {
+      return res.status(400).json(formatErrorResponse("maxPlayers must be between 2 and 6"));
+    }
+    if (mode !== "individual" && mode !== "team") {
+      return res.status(400).json(formatErrorResponse("Invalid mode"));
+    }
+    if (mode === "team" && (maxPlayers < 4 || maxPlayers % 2 !== 0)) {
+      return res.status(400).json(formatErrorResponse("Team mode requires 4 or 6 players"));
+    }
     const code = generateRoomCode();
 
     const room = await Room().create({
@@ -127,10 +167,25 @@ export async function getRoomDetails(req: Request, res: Response) {
     const players = await RoomPlayer().find({ roomId }).populate('userId', 'displayName avatarUrl');
     const orderedPlayers = sortPlayersByColor(players, room.settings.maxPlayers);
 
-    const currentIndex = getCurrentIndex(room, orderedPlayers);
+    const cachedState = await gameStateCache.getState(roomId, room.toObject());
+    const roomView = cachedState
+      ? {
+          ...room.toObject(),
+          status: cachedState.status,
+          currentPlayerIndex: cachedState.currentPlayerIndex,
+          gameBoard: {
+            ...cachedState.gameBoard,
+            lastRollAt: cachedState.gameBoard.lastRollAt
+              ? new Date(cachedState.gameBoard.lastRollAt)
+              : null,
+          },
+        }
+      : room.toObject();
+
+    const currentIndex = getCurrentIndex(roomView, orderedPlayers);
 
     return res.json(formatSuccessResponse({
-        ...room.toObject(),
+        ...roomView,
         id: room._id,
         currentPlayerIndex: currentIndex,
         players: orderedPlayers.map(p => {
@@ -168,8 +223,10 @@ export async function leaveRoom(req: Request, res: Response) {
         const room = await Room().findById(roomId);
         if (room) {
             room.players.pull(roomPlayer._id);
+            invalidateRoomPlayers(roomId);
             if (room.players.length === 0) {
                 await Room().findByIdAndDelete(roomId);
+                await gameStateCache.evict(roomId);
             } else if (room.hostId.toString() === userIdStr) {
                 const newHost = await RoomPlayer().findOne({ roomId });
                 if(newHost) room.hostId = newHost.userId;
@@ -226,6 +283,7 @@ export async function updateRoomStatus(req: Request, res: Response) {
     room.gameBoard.gameLog.push("Game started");
 
     await room.save();
+    await gameStateCache.primeFromRoomDoc(room);
     emitRoomUpdate(room._id.toString(), { type: "game:start" });
 
     return res.json(formatSuccessResponse(room.gameBoard));
@@ -237,6 +295,7 @@ export async function updateRoomStatus(req: Request, res: Response) {
 
 export async function rollDice(req: Request, res: Response) {
   try {
+    const t0 = perfNow();
     const { roomId } = req.params;
     const userId = req.userId;
     if (!userId) return res.status(401).json(formatErrorResponse("Unauthorized"));
@@ -247,51 +306,133 @@ export async function rollDice(req: Request, res: Response) {
 
     console.log("[rollDice] roomId", roomId, "userId", userIdStr);
 
+    const tRoom = perfNow();
     const room = await Room().findById(roomId);
     if (!room) return res.status(404).json(formatErrorResponse("Room not found"));
+    logPerf("rollDice.roomLookup", tRoom);
 
+    const tPlayers = perfNow();
     const players = await RoomPlayer().find({ roomId });
     const orderedPlayers = sortPlayersByColor(players, room.settings.maxPlayers);
-    const currentIndex = getCurrentIndex(room, orderedPlayers);
-    const current = orderedPlayers[currentIndex];
-    room.currentPlayerIndex = currentIndex;
-    if (!room.gameBoard.currentPlayerId) {
-      room.gameBoard.currentPlayerId = current._id;
-    }
-
-    if (current.userId.toString() !== userIdStr) return res.status(403).json(formatErrorResponse("Not your turn"));
-    if (room.gameBoard.winners.some((w: { playerId: Types.ObjectId }) => w.playerId.toString() === current._id.toString())) {
-      return res.status(403).json(formatErrorResponse("Winner cannot roll"));
-    }
-    if (room.gameBoard.diceValue !== null) return res.status(400).json(formatErrorResponse("Already rolled"));
-
-    const dice = Math.floor(Math.random() * 6) + 1;
-    room.gameBoard.diceValue = dice;
-    room.gameBoard.lastRollAt = new Date();
-    
+    logPerf("rollDice.playersLookup", tPlayers, { players: orderedPlayers.length });
     const config = getGameConfig(room.settings.maxPlayers);
-    const tokenKeys = Object.keys(room.gameBoard.tokens || {});
-    console.log("[rollDice] currentColor", current.color, "dice", dice, "tokenKeys", tokenKeys);
-    const valid = findValidMoves(room.gameBoard.tokens, current.color, dice, config);
-    console.log("[rollDice] validMoves", valid);
-    room.gameBoard.validMoves = valid;
-    
-    if (valid.length === 0) {
-      room.currentPlayerIndex = advanceGameTurn(currentIndex, orderedPlayers, room.gameBoard);
-      room.gameBoard.currentPlayerId = orderedPlayers[room.currentPlayerIndex]._id;
-      room.gameBoard.diceValue = null;
-      room.gameBoard.validMoves = [];
-      room.gameBoard.lastRollAt = null;
-      room.gameBoard.gameLog.push("No move, turn skipped");
-      console.log("[rollDice] no moves, advanced to index", room.currentPlayerIndex);
-    }
 
-    await room.save();
-    emitRoomUpdate(room._id.toString(), { type: "dice:roll", dice });
-    return res.json(formatSuccessResponse({ dice, valid }));
+    const tState = perfNow();
+    const payload = await gameStateCache.runExclusive(roomId, async () => {
+      const state = await gameStateCache.getState(roomId, room.toObject());
+      if (!state) throw new Error("STATE_NOT_FOUND");
+
+      const currentIndex = getCurrentIndex(
+        { currentPlayerIndex: state.currentPlayerIndex, gameBoard: state.gameBoard },
+        orderedPlayers
+      );
+      const current = orderedPlayers[currentIndex];
+      state.currentPlayerIndex = currentIndex;
+      if (!state.gameBoard.currentPlayerId) state.gameBoard.currentPlayerId = current._id.toString();
+
+      if (current.userId.toString() !== userIdStr) {
+        if (PERF_DEBUG) {
+          console.warn("[turn-mismatch][rollDice]", {
+            roomId,
+            expectedUserId: current.userId.toString(),
+            actualUserId: userIdStr,
+            currentPlayerRoomPlayerId: current._id.toString(),
+            stateCurrentPlayerId: state.gameBoard.currentPlayerId,
+            currentIndex,
+          });
+        }
+        throw new Error("NOT_YOUR_TURN");
+      }
+      if (state.gameBoard.winners.some((w) => String(w.playerId) === current._id.toString())) {
+        if (room.settings.mode !== "team") throw new Error("WINNER_CANNOT_ROLL");
+      }
+      if (state.gameBoard.diceValue !== null) {
+        throw new Error("ALREADY_ROLLED");
+      }
+
+      const controllableColors = getControllableColors(room.settings.mode, room.settings.maxPlayers, current.color);
+      const dice = generateDiceValue({
+        roomId,
+        playerId: current._id.toString(),
+        playerColor: current.color,
+        controllableColors,
+        state,
+        gameConfig: config,
+      });
+      state.gameBoard.diceValue = dice;
+      state.gameBoard.lastRollAt = new Date().toISOString();
+
+      const valid = findValidMoves(state.gameBoard.tokens, current.color, dice, config, controllableColors);
+      state.gameBoard.validMoves = valid;
+      reportDiceOutcome(roomId, current._id.toString(), dice, valid.length > 0);
+
+      if (valid.length === 0) {
+        state.currentPlayerIndex = advanceGameTurn(
+          currentIndex,
+          orderedPlayers,
+          state.gameBoard as any,
+          room.settings.mode !== "team"
+        );
+        state.gameBoard.currentPlayerId = orderedPlayers[state.currentPlayerIndex]._id.toString();
+        state.gameBoard.diceValue = null;
+        state.gameBoard.validMoves = [];
+        state.gameBoard.lastRollAt = null;
+        state.gameBoard.gameLog.push("No move, turn skipped");
+      }
+
+      await gameStateCache.markDirty(roomId, "dice:roll", false);
+      return {
+        dice,
+        valid,
+        patch: {
+          revision: state.revision,
+          currentPlayerIndex: state.currentPlayerIndex,
+          gameBoard: {
+            diceValue: state.gameBoard.diceValue,
+            validMoves: state.gameBoard.validMoves,
+            currentPlayerId: state.gameBoard.currentPlayerId,
+            lastRollAt: state.gameBoard.lastRollAt,
+          },
+        },
+      };
+    });
+    logPerf("rollDice.stateUpdate", tState);
+
+    const tEmit = perfNow();
+    emitRoomUpdate(room._id.toString(), {
+      type: "dice:roll",
+      dice: payload.dice,
+      patch: payload.patch,
+    });
+    logPerf("rollDice.emit", tEmit);
+    logPerf("rollDice.total", t0);
+    return res.json(formatSuccessResponse(payload));
   } catch (e) {
+    if (e instanceof Error) {
+      if (e.message === "NOT_YOUR_TURN") return res.status(403).json(formatErrorResponse("Not your turn"));
+      if (e.message === "WINNER_CANNOT_ROLL") return res.status(403).json(formatErrorResponse("Winner cannot roll"));
+      if (e.message === "ALREADY_ROLLED") return res.status(400).json(formatErrorResponse("Already rolled"));
+      if (e.message === "STATE_NOT_FOUND") return res.status(404).json(formatErrorResponse("Room state not found"));
+    }
     console.error("Roll dice error:", e);
     return res.status(500).json(formatErrorResponse("Roll dice failed"));
+  }
+}
+
+export async function getRoomCacheStatus(req: Request, res: Response) {
+  try {
+    const { roomId } = req.params;
+    if (!isValidObjectId(roomId)) {
+      return res.status(400).json(formatErrorResponse("Invalid roomId"));
+    }
+    const room = await Room().findById(roomId).select("_id");
+    if (!room) return res.status(404).json(formatErrorResponse("Room not found"));
+
+    const diagnostics = await gameStateCache.getDiagnostics(roomId);
+    return res.json(formatSuccessResponse(diagnostics));
+  } catch (error) {
+    console.error("Get room cache status error:", error);
+    return res.status(500).json(formatErrorResponse("Failed to fetch cache status"));
   }
 }
 
@@ -300,6 +441,7 @@ export async function rollDice(req: Request, res: Response) {
 ============================================================ */
 export async function advanceTurn(req: Request, res: Response) {
   try {
+    const t0 = perfNow();
     const { roomId } = req.params;
     const userId = req.userId;
     if (!userId) return res.status(401).json(formatErrorResponse("Unauthorized"));
@@ -308,38 +450,94 @@ export async function advanceTurn(req: Request, res: Response) {
       return res.status(400).json(formatErrorResponse("Invalid roomId"));
     }
 
+    const tRoom = perfNow();
     const room = await Room().findById(roomId);
     if (!room) return res.status(404).json(formatErrorResponse("Room not found"));
+    logPerf("advanceTurn.roomLookup", tRoom);
 
+    const tPlayers = perfNow();
     const players = await RoomPlayer().find({ roomId });
     const orderedPlayers = sortPlayersByColor(players, room.settings.maxPlayers);
-    const currentIndex = getCurrentIndex(room, orderedPlayers);
-    const current = orderedPlayers[currentIndex];
-    room.currentPlayerIndex = currentIndex;
-    if (!room.gameBoard.currentPlayerId) {
-      room.gameBoard.currentPlayerId = current._id;
-    }
-    if (current.userId.toString() !== userIdStr) {
-      return res.status(403).json(formatErrorResponse("It is not your turn to advance"));
-    }
+    logPerf("advanceTurn.playersLookup", tPlayers, { players: orderedPlayers.length });
 
-    if (room.gameBoard.diceValue !== null && room.gameBoard.lastRollAt) {
-      const elapsed = Date.now() - new Date(room.gameBoard.lastRollAt).getTime();
-      if (elapsed < 20000) {
+    const tState = perfNow();
+    const payload = await gameStateCache.runExclusive(roomId, async () => {
+      const state = await gameStateCache.getState(roomId, room.toObject());
+      if (!state) throw new Error("STATE_NOT_FOUND");
+
+      const currentIndex = getCurrentIndex(
+        { currentPlayerIndex: state.currentPlayerIndex, gameBoard: state.gameBoard },
+        orderedPlayers
+      );
+      const current = orderedPlayers[currentIndex];
+      state.currentPlayerIndex = currentIndex;
+      if (!state.gameBoard.currentPlayerId) state.gameBoard.currentPlayerId = current._id.toString();
+      if (current.userId.toString() !== userIdStr) {
+        if (PERF_DEBUG) {
+          console.warn("[turn-mismatch][advanceTurn]", {
+            roomId,
+            expectedUserId: current.userId.toString(),
+            actualUserId: userIdStr,
+            currentPlayerRoomPlayerId: current._id.toString(),
+            stateCurrentPlayerId: state.gameBoard.currentPlayerId,
+            currentIndex,
+          });
+        }
+        throw new Error("NOT_YOUR_TURN");
+      }
+
+      if (state.gameBoard.diceValue !== null && state.gameBoard.lastRollAt) {
+        const elapsed = Date.now() - new Date(state.gameBoard.lastRollAt).getTime();
+        if (elapsed < 20000) {
+          throw new Error("MOVE_TIME_NOT_EXPIRED");
+        }
+      }
+
+      state.currentPlayerIndex = advanceGameTurn(
+        currentIndex,
+        orderedPlayers,
+        state.gameBoard as any,
+        room.settings.mode !== "team"
+      );
+      state.gameBoard.currentPlayerId = orderedPlayers[state.currentPlayerIndex]._id.toString();
+      state.gameBoard.diceValue = null;
+      state.gameBoard.validMoves = [];
+      state.gameBoard.lastRollAt = null;
+
+      await gameStateCache.markDirty(roomId, "turn:advance", false);
+      return {
+        currentPlayerId: state.gameBoard.currentPlayerId,
+        patch: {
+          revision: state.revision,
+          currentPlayerIndex: state.currentPlayerIndex,
+          gameBoard: {
+            currentPlayerId: state.gameBoard.currentPlayerId,
+            diceValue: state.gameBoard.diceValue,
+            validMoves: state.gameBoard.validMoves,
+            lastRollAt: state.gameBoard.lastRollAt,
+          },
+        },
+      };
+    });
+    logPerf("advanceTurn.stateUpdate", tState);
+
+    const tEmit = perfNow();
+    emitRoomUpdate(room._id.toString(), { type: "turn:advance", patch: payload.patch });
+    logPerf("advanceTurn.emit", tEmit);
+    logPerf("advanceTurn.total", t0);
+    return res.json(formatSuccessResponse(payload, "Turn advanced"));
+  } catch (error) {
+    if (error instanceof Error) {
+      if (error.message === "NOT_YOUR_TURN") {
+        return res.status(403).json(formatErrorResponse("It is not your turn to advance"));
+      }
+      if (error.message === "MOVE_TIME_NOT_EXPIRED") {
         return res.status(400).json(formatErrorResponse("Move time has not expired"));
       }
+      if (error.message === "STATE_NOT_FOUND") {
+        return res.status(404).json(formatErrorResponse("Room state not found"));
+      }
     }
-
-    room.currentPlayerIndex = advanceGameTurn(currentIndex, orderedPlayers, room.gameBoard);
-    room.gameBoard.currentPlayerId = orderedPlayers[room.currentPlayerIndex]._id;
-    room.gameBoard.diceValue = null;
-    room.gameBoard.validMoves = [];
-    room.gameBoard.lastRollAt = null;
-
-    await room.save();
-    emitRoomUpdate(room._id.toString(), { type: "turn:advance" });
-    return res.json(formatSuccessResponse({ currentPlayerId: room.gameBoard.currentPlayerId }, "Turn advanced"));
-  } catch (error) {
     console.error("Advance turn error:", error);
     return res.status(500).json(formatErrorResponse("Failed to advance turn"));
   }
@@ -347,6 +545,7 @@ export async function advanceTurn(req: Request, res: Response) {
 
 export async function makeMove(req: Request, res: Response) {
   try {
+    const t0 = perfNow();
     const { roomId } = req.params;
     const { tokenId, color, diceValue, enterHome } = req.body;
     const userId = req.userId;
@@ -368,72 +567,153 @@ export async function makeMove(req: Request, res: Response) {
 
     console.log("[makeMove] roomId", roomId, "userId", userIdStr, "tokenId", tokenId, "color", moveColor, "diceValue", diceValue);
 
+    const tRoom = perfNow();
     const room = await Room().findById(roomId);
     if (!room) return res.status(404).json(formatErrorResponse('Room not found'));
+    logPerf("makeMove.roomLookup", tRoom);
 
+    const tPlayers = perfNow();
     const players = await RoomPlayer().find({ roomId });
     const orderedPlayers = sortPlayersByColor(players, room.settings.maxPlayers);
-    const currentIndex = getCurrentIndex(room, orderedPlayers);
-    const current = orderedPlayers[currentIndex];
-    room.currentPlayerIndex = currentIndex;
-    if (!room.gameBoard.currentPlayerId) {
-      room.gameBoard.currentPlayerId = current._id;
-    }
+    logPerf("makeMove.playersLookup", tPlayers, { players: orderedPlayers.length });
 
-    if (current.userId.toString() !== userIdStr) return res.status(403).json(formatErrorResponse("Not your turn"));
-    if (room.gameBoard.winners.some((w: { playerId: Types.ObjectId }) => w.playerId.toString() === current._id.toString())) {
-      return res.status(403).json(formatErrorResponse("Winner cannot move"));
-    }
-    if (room.gameBoard.diceValue !== diceValue) return res.status(400).json(formatErrorResponse("Dice value mismatch"));
+    const tState = perfNow();
+    const movePayload = await gameStateCache.runExclusive(roomId, async () => {
+      const state = await gameStateCache.getState(roomId, room.toObject());
+      if (!state) throw new Error("STATE_NOT_FOUND");
 
-    const config = getGameConfig(room.settings.maxPlayers);
-    const isValid = room.gameBoard.validMoves.some((m: { id: number; color: PlayerColor }) => m.id === tokenId && m.color === moveColor);
-    console.log("[makeMove] validMoves", room.gameBoard.validMoves, "isValid", isValid);
-    if (!isValid) return res.status(400).json(formatErrorResponse("Invalid move"));
+      const currentIndex = getCurrentIndex(
+        { currentPlayerIndex: state.currentPlayerIndex, gameBoard: state.gameBoard },
+        orderedPlayers
+      );
+      const current = orderedPlayers[currentIndex];
+      state.currentPlayerIndex = currentIndex;
+      if (!state.gameBoard.currentPlayerId) state.gameBoard.currentPlayerId = current._id.toString();
 
-    const token = room.gameBoard.tokens[moveColor]?.find((t: Token) => t.id === tokenId);
-    if (!token) return res.status(404).json(formatErrorResponse("Token not found"));
+      if (current.userId.toString() !== userIdStr) {
+        if (PERF_DEBUG) {
+          console.warn("[turn-mismatch][makeMove]", {
+            roomId,
+            expectedUserId: current.userId.toString(),
+            actualUserId: userIdStr,
+            currentPlayerRoomPlayerId: current._id.toString(),
+            stateCurrentPlayerId: state.gameBoard.currentPlayerId,
+            currentIndex,
+          });
+        }
+        throw new Error("NOT_YOUR_TURN");
+      }
+      if (state.gameBoard.winners.some((w) => String(w.playerId) === current._id.toString())) {
+        if (room.settings.mode !== "team") throw new Error("WINNER_CANNOT_MOVE");
+      }
+      if (state.gameBoard.diceValue !== diceValue) throw new Error("DICE_MISMATCH");
 
-    const { updatedToken, capturedToken } = applyMove(token, diceValue, moveColor, config, room.gameBoard.tokens, enterHome !== false);
-    console.log("[makeMove] updatedToken", updatedToken);
-    const newTokens: Record<PlayerColor, Token[]> = { ...(room.gameBoard.tokens || {}) };
-    newTokens[moveColor] = (newTokens[moveColor] || []).map((t: Token) => (t.id === tokenId ? updatedToken : t));
+      const config = getGameConfig(room.settings.maxPlayers);
+      const controllableColors = getControllableColors(room.settings.mode, room.settings.maxPlayers, current.color);
+      if (!controllableColors.includes(moveColor)) throw new Error("INVALID_TEAM_COLOR");
+      const isValid = state.gameBoard.validMoves.some((m) => m.id === tokenId && m.color === moveColor);
+      if (!isValid) throw new Error("INVALID_MOVE");
 
-    if (capturedToken) {
+      const token = state.gameBoard.tokens[moveColor]?.find((t: Token) => t.id === tokenId);
+      if (!token) throw new Error("TOKEN_NOT_FOUND");
+
+      const { updatedToken, capturedToken } = applyMove(
+        token,
+        diceValue,
+        moveColor,
+        config,
+        state.gameBoard.tokens,
+        enterHome !== false,
+        controllableColors
+      );
+
+      const newTokens: Record<PlayerColor, Token[]> = { ...(state.gameBoard.tokens || {}) };
+      newTokens[moveColor] = (newTokens[moveColor] || []).map((t: Token) => (t.id === tokenId ? updatedToken : t));
+
+      if (capturedToken) {
         newTokens[capturedToken.color] = (newTokens[capturedToken.color] || []).map((t: Token) =>
-          t.id === capturedToken.id ? { ...t, position: -1, status: 'base', steps: -1 } : t
+          t.id === capturedToken.id ? { ...t, position: -1, status: "base", steps: -1 } : t
         );
-    }
+      }
 
-    room.gameBoard.tokens = newTokens;
-    room.markModified("gameBoard.tokens");
-    
-    const hasWon = checkWinCondition(room.gameBoard.tokens, moveColor);
-    if (hasWon && !room.gameBoard.winners.some((w: { playerId: Types.ObjectId }) => (w.playerId as any).equals(current._id))) {
-        room.gameBoard.winners.push({ playerId: current._id, rank: room.gameBoard.winners.length + 1 });
-        room.gameBoard.gameLog.push(`${current.displayName || 'Player'} finished! Rank ${room.gameBoard.winners.length}`);
-    }
+      state.gameBoard.tokens = newTokens;
 
-    room.gameBoard.diceValue = null;
-    room.gameBoard.validMoves = [];
-    room.gameBoard.lastRollAt = null;
+      const hasWon = checkWinCondition(state.gameBoard.tokens, moveColor);
+      const moveOwner = orderedPlayers.find((p) => p.color === moveColor);
+      const moveOwnerId = moveOwner?._id?.toString();
+      if (hasWon && moveOwnerId && !state.gameBoard.winners.some((w) => String(w.playerId) === moveOwnerId)) {
+        state.gameBoard.winners.push({ playerId: moveOwnerId, rank: state.gameBoard.winners.length + 1 });
+        state.gameBoard.gameLog.push(`${moveOwner.displayName || "Player"} finished! Rank ${state.gameBoard.winners.length}`);
+      }
 
-    const earnedExtraTurn = diceValue === 6 || !!capturedToken;
-    const gameCompleted = hasWon && room.gameBoard.winners.length >= room.settings.maxPlayers;
-    if (gameCompleted) {
-        room.status = 'completed';
-        room.gameBoard.gameLog.push('Game Over! All players finished.');
-    } else if (earnedExtraTurn) {
-        room.gameBoard.gameLog.push(`${current.displayName || 'Player'} earned an extra turn!`);
-    } else {
-        room.currentPlayerIndex = advanceGameTurn(currentIndex, orderedPlayers, room.gameBoard);
-        room.gameBoard.currentPlayerId = orderedPlayers[room.currentPlayerIndex]._id;
-    }
+      state.gameBoard.diceValue = null;
+      state.gameBoard.validMoves = [];
+      state.gameBoard.lastRollAt = null;
 
-    await room.save();
-    emitRoomUpdate(room._id.toString(), { type: "move", color: moveColor, tokenId, diceValue });
-    return res.json(formatSuccessResponse(room.gameBoard));
+      const reachedHomeThisMove = token.status !== "home" && updatedToken.status === "home";
+      const earnedExtraTurn = diceValue === 6 || !!capturedToken || reachedHomeThisMove;
+      const gameCompleted = hasWon && state.gameBoard.winners.length >= room.settings.maxPlayers;
+      if (gameCompleted) {
+        state.status = "completed";
+        state.gameBoard.gameLog.push("Game Over! All players finished.");
+      } else if (earnedExtraTurn) {
+        state.gameBoard.gameLog.push(`${current.displayName || "Player"} earned an extra turn!`);
+      } else {
+        state.currentPlayerIndex = advanceGameTurn(
+          currentIndex,
+          orderedPlayers,
+          state.gameBoard as any,
+          room.settings.mode !== "team"
+        );
+        state.gameBoard.currentPlayerId = orderedPlayers[state.currentPlayerIndex]._id.toString();
+      }
+
+      await gameStateCache.markDirty(roomId, "move", gameCompleted);
+      const tokenPatch: Partial<Record<PlayerColor, Token[]>> = {
+        [moveColor]: newTokens[moveColor],
+      };
+      if (capturedToken) tokenPatch[capturedToken.color] = newTokens[capturedToken.color];
+
+      return {
+        board: state.gameBoard,
+        patch: {
+          revision: state.revision,
+          status: state.status,
+          currentPlayerIndex: state.currentPlayerIndex,
+          gameBoard: {
+            tokens: tokenPatch,
+            currentPlayerId: state.gameBoard.currentPlayerId,
+            diceValue: state.gameBoard.diceValue,
+            validMoves: state.gameBoard.validMoves,
+            winners: state.gameBoard.winners,
+            lastRollAt: state.gameBoard.lastRollAt,
+          },
+        },
+      };
+    });
+    logPerf("makeMove.stateUpdate", tState);
+
+    const tEmit = perfNow();
+    emitRoomUpdate(room._id.toString(), {
+      type: "move",
+      color: moveColor,
+      tokenId,
+      diceValue,
+      patch: movePayload.patch,
+    });
+    logPerf("makeMove.emit", tEmit);
+    logPerf("makeMove.total", t0, { tokenId, color: moveColor, diceValue });
+    return res.json(formatSuccessResponse(movePayload.board));
   } catch (e) {
+    if (e instanceof Error) {
+      if (e.message === "NOT_YOUR_TURN") return res.status(403).json(formatErrorResponse("Not your turn"));
+      if (e.message === "WINNER_CANNOT_MOVE") return res.status(403).json(formatErrorResponse("Winner cannot move"));
+      if (e.message === "DICE_MISMATCH") return res.status(400).json(formatErrorResponse("Dice value mismatch"));
+      if (e.message === "INVALID_MOVE") return res.status(400).json(formatErrorResponse("Invalid move"));
+      if (e.message === "INVALID_TEAM_COLOR") return res.status(403).json(formatErrorResponse("You can only move your team colors"));
+      if (e.message === "TOKEN_NOT_FOUND") return res.status(404).json(formatErrorResponse("Token not found"));
+      if (e.message === "STATE_NOT_FOUND") return res.status(404).json(formatErrorResponse("Room state not found"));
+    }
     console.error("Make move error:", e);
     return res.status(500).json(formatErrorResponse("Make move failed"));
   }
@@ -507,6 +787,7 @@ export async function joinRoom(req: Request, res: Response) {
 
     room.players.push(rp._id);
     await room.save();
+    invalidateRoomPlayers(room._id.toString());
 
     return res.json(formatSuccessResponse({ roomId: room._id }, "Joined room"));
   } catch (error) {
@@ -529,6 +810,7 @@ export async function togglePlayerReady(req: Request, res: Response) {
     
     rp.ready = !rp.ready;
     await rp.save();
+    invalidateRoomPlayers(roomId);
 
     return res.json(formatSuccessResponse({ ready: rp.ready }));
   } catch (e) {

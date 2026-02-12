@@ -5,6 +5,7 @@ import {
   createRoom,
   getRooms,
   getRoomDetails,
+  getRoomCacheStatus,
   updateRoomStatus,   // start game
   advanceTurn,
   rollDice,
@@ -22,6 +23,7 @@ const router = Router();
 router.post("/", authMiddleware, createRoom);
 router.get("/", getRooms);
 router.get("/:roomId", getRoomDetails);
+router.get("/:roomId/cache-status", authMiddleware, getRoomCacheStatus);
 
 // Join by room code (preferred)
 router.post("/join", authMiddleware, joinRoom);

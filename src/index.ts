@@ -5,12 +5,18 @@ import cors from 'cors';
 import mongoose from 'mongoose';
 import { connectDB, disconnectDB } from './utils/database';
 import authRoutes from './routes/authRoutes';
+import profileRoutes from './routes/profileRoutes';
 import roomRoutes from './routes/roomRoutes';
+import messageRoutes from './messages/messageRoutes';
+import { logSupabaseProfileStorageStatus } from './controllers/profileController';
 import { initSocket } from './socket';
+import { gameStateCache } from './state/gameStateCache';
 // Register Mongoose models
 import './models/User';
 import './models/Room';
 import './models/RoomPlayer';
+import './messages/models/Conversation';
+import './messages/models/Message';
 
 dotenv.config();
 
@@ -31,7 +37,7 @@ if (process.env.NODE_ENV === 'production' && !process.env.CORS_ORIGIN) {
 const allowedOrigins = CORS_ORIGIN.split(',').map(s => s.trim()).filter(Boolean);
 
 // Middleware
-app.use(express.json());
+app.use(express.json({ limit: "8mb" }));
 app.use(cors({
   origin: (origin, callback) => {
     // Allow non-browser requests (e.g., server-to-server, testing tools)
@@ -54,6 +60,7 @@ app.get('/health', (req, res) => {
     status: 'ok',
     uptimeSeconds: Math.floor(process.uptime()),
     dbState,
+    redisConnected: gameStateCache.isRedisConnected(),
   });
 });
 
@@ -61,10 +68,14 @@ app.get('/health', (req, res) => {
 async function start() {
   try {
     await connectDB();
+    await gameStateCache.init();
+    await logSupabaseProfileStorageStatus();
 
     // ONLY set up routes AFTER the database is connected
     app.use('/api/auth', authRoutes);
+    app.use('/api/profile', profileRoutes);
     app.use('/api/rooms', roomRoutes);
+    app.use('/api/messages', messageRoutes);
 
     server = http.createServer(app);
     initSocket(server, CORS_ORIGIN);
@@ -87,6 +98,7 @@ async function shutdown(signal: string) {
         server?.close(err => (err ? reject(err) : resolve()));
       });
     }
+    await gameStateCache.shutdown();
     await disconnectDB();
     process.exit(0);
   } catch (error) {

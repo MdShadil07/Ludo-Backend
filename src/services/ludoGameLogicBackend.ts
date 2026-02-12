@@ -15,26 +15,28 @@ export function findValidMoves(
   tokens: Record<PlayerColor, Token[]>,
   currentPlayerColor: PlayerColor,
   diceValue: number,
-  gameConfig: GameConfig
+  gameConfig: GameConfig,
+  controllableColors?: PlayerColor[]
 ): { id: number; color: PlayerColor }[] {
   const result: { id: number; color: PlayerColor }[] = [];
-
-  const playerTokens = tokens[currentPlayerColor];
-  const player = gameConfig.players.find((p) => p.id === currentPlayerColor);
-  if (!player) return [];
-
-  const trackLength = TRACK_COORDS.length;
-  const homeCellCount = Math.max(1, gameConfig.HOME_RUNS[currentPlayerColor].length - 1);
-  const entryCoord = gameConfig.HOME_ENTRANCES[currentPlayerColor];
-  const entryIndex = TRACK_COORDS.findIndex(
-    ([r, c]) => r === entryCoord[0] && c === entryCoord[1]
+  const controlledColors = Array.from(
+    new Set((controllableColors && controllableColors.length ? controllableColors : [currentPlayerColor]))
   );
-  const entryIndexAdjusted =
-    entryIndex === -1 ? -1 : (entryIndex - 2 + trackLength) % trackLength;
-  const homeStartIndex =
-    entryIndexAdjusted === -1 ? -1 : (entryIndexAdjusted + 1) % trackLength;
+  const controlledSet = new Set(controlledColors);
+  const trackLength = TRACK_COORDS.length;
+  const rotationThreshold = Math.max(1, trackLength - 2);
 
-  for (const token of playerTokens) {
+  for (const color of controlledColors) {
+    const playerTokens = tokens[color] || [];
+    const homeCellCount = Math.max(1, gameConfig.HOME_RUNS[color].length - 1);
+    const entryCoord = gameConfig.HOME_ENTRANCES[color];
+    const entryIndex = TRACK_COORDS.findIndex(
+      ([r, c]) => r === entryCoord[0] && c === entryCoord[1]
+    );
+    const entryIndexAdjusted =
+      entryIndex === -1 ? -1 : (entryIndex - 2 + trackLength) % trackLength;
+
+    for (const token of playerTokens) {
     if (token.status === "home") continue;
 
     // --- TOKEN IN BASE ---
@@ -60,7 +62,7 @@ export function findValidMoves(
         let blocked = false;
 
         for (const enemyColor in tokens) {
-          if (enemyColor === currentPlayerColor) continue;
+          if (controlledSet.has(enemyColor as PlayerColor)) continue;
 
           const enemies = tokens[enemyColor as PlayerColor];
           const count = enemies.filter(
@@ -77,10 +79,10 @@ export function findValidMoves(
       }
       if (entryIndexAdjusted !== -1) {
         const distanceToArrow = (entryIndexAdjusted - token.position + trackLength) % trackLength;
-        if (diceValue > distanceToArrow) {
-          const toEntry = diceValue - distanceToArrow;
-          const remaining = toEntry - 1;
-          const canEnter = remaining > 0 && remaining <= homeCellCount + 1;
+        const completesLapAtArrow = token.steps + distanceToArrow >= rotationThreshold;
+        if (completesLapAtArrow && diceValue > distanceToArrow) {
+          const overshoot = diceValue - distanceToArrow;
+          const canEnter = overshoot >= 1 && overshoot <= homeCellCount + 1;
           if (canEnter) return false;
         }
       }
@@ -91,17 +93,19 @@ export function findValidMoves(
       if (token.position >= 52) return false;
       if (entryIndexAdjusted === -1) return false;
       const distanceToArrow = (entryIndexAdjusted - token.position + trackLength) % trackLength;
+      const completesLapAtArrow = token.steps + distanceToArrow >= rotationThreshold;
+      if (!completesLapAtArrow) return false;
       if (diceValue <= distanceToArrow) return false;
-      const toEntry = diceValue - distanceToArrow;
-      const remaining = toEntry - 1;
-      if (remaining <= 0) return false;
-      if (remaining > homeCellCount + 1) return false;
+      const overshoot = diceValue - distanceToArrow;
+      if (overshoot < 1) return false;
+      if (overshoot > homeCellCount + 1) return false;
       return true;
     })();
 
     if (canContinueOnTrack || canEnterHome) {
       result.push({ id: token.id, color: token.color });
     }
+  }
   }
 
   return result;
@@ -116,10 +120,14 @@ export function applyMove(
   playerColor: PlayerColor,
   gameConfig: GameConfig,
   allTokens: Record<PlayerColor, Token[]>,
-  enterHome: boolean = true
+  enterHome: boolean = true,
+  alliedColors?: PlayerColor[]
 ): { updatedToken: Token; capturedToken?: { id: number; color: PlayerColor } } {
   const updatedToken = { ...currentToken };
   let capturedToken: { id: number; color: PlayerColor } | undefined;
+  const alliedSet = new Set(
+    Array.from(new Set((alliedColors && alliedColors.length ? alliedColors : [playerColor])))
+  );
 
   const trackLength = TRACK_COORDS.length;
   const homeCellCount = Math.max(1, gameConfig.HOME_RUNS[playerColor].length - 1);
@@ -130,8 +138,7 @@ export function applyMove(
   );
   const entryIndexAdjusted =
     entryIndex === -1 ? -1 : (entryIndex - 2 + trackLength) % trackLength;
-  const homeStartIndex =
-    entryIndexAdjusted === -1 ? -1 : (entryIndexAdjusted + 1) % trackLength;
+  const rotationThreshold = Math.max(1, trackLength - 2);
 
   // --- OUT OF BASE ---
   if (updatedToken.status === "base") {
@@ -165,11 +172,11 @@ export function applyMove(
   // --- OPTIONAL HOME ENTRY (crossing entry cell) ---
   if (enterHome && entryIndexAdjusted !== -1 && updatedToken.position < 52) {
     const distanceToArrow = (entryIndexAdjusted - updatedToken.position + trackLength) % trackLength;
-    if (diceValue > distanceToArrow) {
-      const toEntry = diceValue - distanceToArrow;
-      const remaining = toEntry - 1;
-      if (remaining > 0 && remaining <= homeCellCount + 1) {
-        if (remaining === homeCellCount + 1) {
+    const completesLapAtArrow = updatedToken.steps + distanceToArrow >= rotationThreshold;
+    if (completesLapAtArrow && diceValue > distanceToArrow) {
+      const overshoot = diceValue - distanceToArrow;
+      if (overshoot >= 1 && overshoot <= homeCellCount + 1) {
+        if (overshoot === homeCellCount + 1) {
           updatedToken.status = "home";
           updatedToken.steps = updatedToken.steps + diceValue;
           updatedToken.position = 58;
@@ -177,7 +184,7 @@ export function applyMove(
         }
         updatedToken.status = "safe";
         updatedToken.steps = updatedToken.steps + diceValue;
-        updatedToken.position = 52 + (remaining - 1);
+        updatedToken.position = 52 + (overshoot - 1);
         return { updatedToken };
       }
     }
@@ -193,7 +200,7 @@ export function applyMove(
   // --- CAPTURE ---
   if (!SAFE_INDICES.includes(newPos)) {
     for (const enemyColor in allTokens) {
-      if (enemyColor === playerColor) continue;
+      if (alliedSet.has(enemyColor as PlayerColor)) continue;
 
       const enemies = allTokens[enemyColor as PlayerColor];
 
@@ -226,13 +233,15 @@ export function checkWinCondition(
  */
 export function advanceTurn(
   currentPlayerIndex: number,
-  roomPlayers: { _id: Types.ObjectId; color: PlayerColor }[],
-  gameBoard: GameBoard
+  roomPlayers: { _id: Types.ObjectId | string; color: PlayerColor }[],
+  gameBoard: GameBoard,
+  skipWinners: boolean = true
 ): number {
   const total = roomPlayers.length;
 
   for (let i = 1; i <= total; i++) {
     const next = (currentPlayerIndex + i) % total;
+    if (!skipWinners) return next;
 
     const eliminated = gameBoard.winners.some(
       (w) => w.playerId.toString() === roomPlayers[next]._id.toString()

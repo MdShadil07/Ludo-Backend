@@ -1,7 +1,7 @@
 /**
  * LUDO BOARD CONFIGURATION - BACKEND VERSION
  * This configuration is independent of the frontend's ludoConfig.ts
- * Supports 2-8 players
+ * Supports 2-6 players
  */
 
 export type PlayerColor = 'red' | 'green' | 'yellow' | 'blue' | 'purple' | 'orange' | 'white' | 'black';
@@ -133,8 +133,8 @@ export const PLAYER_COLOR_MAPS: Record<number, PlayerColor[]> = {
   2: ['red', 'yellow'], // Red and Yellow (opposite corners)
   3: ['red', 'green', 'blue'], // Red, Green, Blue
   4: ['red', 'green', 'yellow', 'blue'], // All four corners
+  5: ['red', 'green', 'yellow', 'blue', 'orange'], // 4 corners + 1 side
   6: ['red', 'green', 'yellow', 'blue', 'purple', 'orange'], // 4 corners + 2 sides
-  // Add for 8 players if needed
 };
 
 export interface GameConfig {

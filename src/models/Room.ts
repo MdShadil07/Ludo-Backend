@@ -83,7 +83,7 @@ const roomSchema = new Schema<RoomDocument>(
         type: Number,
         required: true,
         min: 2,
-        max: 8,
+        max: 6,
       },
       mode: {
         type: String,
