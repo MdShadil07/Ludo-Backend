@@ -80,7 +80,7 @@ export async function postConversationMessage(req: Request, res: Response) {
       conversationId,
       message: payload.message,
     });
-    payload.participantIds.forEach((participantId) => {
+    payload.participantIds.forEach((participantId: string) => {
       emitUserMessageEvent(participantId, "messages:new", {
         conversationId,
         message: payload.message,
@@ -117,7 +117,7 @@ export async function markRead(req: Request, res: Response) {
       userId,
       readAt: result.readAt,
     });
-    result.participantIds.forEach((participantId) => {
+    result.participantIds.forEach((participantId: string) => {
       emitUserMessageEvent(participantId, "messages:read", {
         conversationId,
         userId,
@@ -137,4 +137,3 @@ export async function markRead(req: Request, res: Response) {
     return res.status(500).json(formatErrorResponse("Failed to mark conversation as read"));
   }
 }
-

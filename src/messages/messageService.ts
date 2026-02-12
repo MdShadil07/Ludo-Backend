@@ -214,7 +214,7 @@ export async function sendMessage(currentUserId: string, conversationId: string,
 
 export async function markConversationRead(currentUserId: string, conversationId: string) {
   const conversation = await getConversationForUser(conversationId, currentUserId);
-  const latest = await Message.findOne({ conversationId: conversation._id })
+  const latest: any = await Message.findOne({ conversationId: conversation._id })
     .sort({ createdAt: -1 })
     .lean();
   const readAt = latest?.createdAt ? new Date(latest.createdAt) : new Date();
@@ -239,4 +239,3 @@ export async function isConversationParticipant(currentUserId: string, conversat
   });
   return Boolean(conversation);
 }
-

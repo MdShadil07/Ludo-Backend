@@ -54,7 +54,7 @@ export function registerMessageSocketHandlers(io: Server, socket: Socket) {
       const eventPayload = { conversationId, message: sent.message };
 
       io.to(`conversation:${conversationId}`).emit("messages:new", eventPayload);
-      sent.participantIds.forEach((participantId) => {
+      sent.participantIds.forEach((participantId: string) => {
         io.to(`user:${participantId}`).emit("messages:new", eventPayload);
       });
 
@@ -71,7 +71,7 @@ export function registerMessageSocketHandlers(io: Server, socket: Socket) {
       const eventPayload = { conversationId, userId, readAt: result.readAt };
 
       io.to(`conversation:${conversationId}`).emit("messages:read", eventPayload);
-      result.participantIds.forEach((participantId) => {
+      result.participantIds.forEach((participantId: string) => {
         io.to(`user:${participantId}`).emit("messages:read", eventPayload);
       });
 
@@ -81,4 +81,3 @@ export function registerMessageSocketHandlers(io: Server, socket: Socket) {
     }
   });
 }
-
