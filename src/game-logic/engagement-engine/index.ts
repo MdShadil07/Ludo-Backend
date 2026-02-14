@@ -3,6 +3,7 @@ import { RuntimeRoomState } from "../../state/gameStateCache";
 import { generateStrategicDice, pureRandomDice } from "./diceStrategy";
 import { consumeGeneratedRollMeta } from "./diceEngineWrapper";
 import { recordCaptureEvent, recordRollOutcome } from "./momentumTracker";
+import { updateStoryOnCapture } from "./storyDirector";
 import { DEFAULT_ENGAGEMENT_PROFILE, resolveEngagementTuning } from "./tuning";
 
 const ENABLE_ENGAGEMENT_DICE = process.env.ENGAGEMENT_DICE_ENABLED !== "false";
@@ -65,8 +66,10 @@ export const reportDiceOutcome = async (
 export const reportCaptureOutcome = async (
   roomId: string,
   attackerPlayerId: string,
-  victimPlayerIds: string[]
+  attackerColor: PlayerColor,
+  victims: Array<{ playerId: string; color: PlayerColor }>
 ) : Promise<void> => {
-  if (!victimPlayerIds.length) return;
-  return recordCaptureEvent(roomId, attackerPlayerId, victimPlayerIds);
+  if (!victims.length) return;
+  await updateStoryOnCapture(roomId, victims.length);
+  return recordCaptureEvent(roomId, attackerPlayerId, attackerColor, victims);
 };

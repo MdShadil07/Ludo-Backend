@@ -8,6 +8,7 @@ type CachedMomentumState = {
   turnsAllTokensInBase: number;
   powerRollCharges: number;
   revengeArmedTurns: number;
+  revengeTargetColors: string[];
   luckDelta: number;
   totalRolls: number;
   lastForcedRollAt: number;
@@ -22,6 +23,25 @@ type RoomForceState = {
   startedAt: number;
 };
 
+export type StoryPhase =
+  | "start"
+  | "spread"
+  | "fights"
+  | "leader"
+  | "hope"
+  | "chaos"
+  | "finish";
+
+type RoomDirectorState = {
+  updatedAt: number;
+  totalRolls: number;
+  captureCount: number;
+  leaderRoomPlayerId: string | null;
+  leaderChanges: number;
+  comebackPulses: number;
+  phase: StoryPhase;
+};
+
 const MOMENTUM_TTL_SECONDS = Number(process.env.ENGAGEMENT_MOMENTUM_TTL_SECONDS || 7200);
 const ENGAGEMENT_CACHE_DEBUG = process.env.ENGAGEMENT_CACHE_DEBUG === "true";
 
@@ -31,6 +51,7 @@ export class EngagementStateCache {
   private readonly redis = new RedisCache();
   private readonly memory = new Map<string, CachedMomentumState>();
   private readonly roomForceMemory = new Map<string, RoomForceState>();
+  private readonly roomDirectorMemory = new Map<string, RoomDirectorState>();
 
   private key(roomId: string, playerId: string): string {
     return `ludo:engagement:${roomId}:player:${playerId}:momentum`;
@@ -38,6 +59,10 @@ export class EngagementStateCache {
 
   private roomForceKey(roomId: string): string {
     return `ludo:engagement:${roomId}:force-state`;
+  }
+
+  private roomDirectorKey(roomId: string): string {
+    return `ludo:engagement:${roomId}:story-director`;
   }
 
   private parseKey(key: string): { roomId: string; playerId: string } | null {
@@ -89,6 +114,7 @@ export class EngagementStateCache {
         noMoveStreak: snapshot.noMoveStreak,
         powerRollCharges: snapshot.powerRollCharges,
         revengeArmedTurns: snapshot.revengeArmedTurns,
+        revengeTargetColors: snapshot.revengeTargetColors,
       });
     }
   }
@@ -110,6 +136,33 @@ export class EngagementStateCache {
     const key = this.roomForceKey(roomId);
     const snapshot = clone(state);
     this.roomForceMemory.set(key, snapshot);
+    await this.redis.setJson(key, snapshot, MOMENTUM_TTL_SECONDS);
+  }
+
+  async getRoomDirectorState(roomId: string): Promise<RoomDirectorState> {
+    const key = this.roomDirectorKey(roomId);
+    const inMemory = this.roomDirectorMemory.get(key);
+    if (inMemory) return clone(inMemory);
+    const fromRedis = await this.redis.getJson<RoomDirectorState>(key);
+    if (fromRedis) {
+      this.roomDirectorMemory.set(key, clone(fromRedis));
+      return clone(fromRedis);
+    }
+    return {
+      updatedAt: Date.now(),
+      totalRolls: 0,
+      captureCount: 0,
+      leaderRoomPlayerId: null,
+      leaderChanges: 0,
+      comebackPulses: 0,
+      phase: "start",
+    };
+  }
+
+  async setRoomDirectorState(roomId: string, state: RoomDirectorState): Promise<void> {
+    const key = this.roomDirectorKey(roomId);
+    const snapshot = clone(state);
+    this.roomDirectorMemory.set(key, snapshot);
     await this.redis.setJson(key, snapshot, MOMENTUM_TTL_SECONDS);
   }
 

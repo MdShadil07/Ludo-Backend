@@ -152,6 +152,41 @@ const computePlayerRankMap = (
   return map;
 };
 
+const isWinnerRoomPlayer = (
+  gameBoard: { winners: Array<{ playerId: string; rank: number }> },
+  roomPlayerId: string
+) => gameBoard.winners.some((w) => String(w.playerId) === roomPlayerId);
+
+const normalizeCurrentTurnForIndividual = (
+  state: { currentPlayerIndex: number; gameBoard: any },
+  orderedPlayers: any[]
+) => {
+  let currentIndex = getCurrentIndex(
+    { currentPlayerIndex: state.currentPlayerIndex, gameBoard: state.gameBoard },
+    orderedPlayers
+  );
+  let current = orderedPlayers[currentIndex];
+  if (!current) return { currentIndex: 0, current: orderedPlayers[0] };
+
+  if (isWinnerRoomPlayer(state.gameBoard, current._id.toString())) {
+    const nextIndex = advanceGameTurn(currentIndex, orderedPlayers, state.gameBoard as any, true);
+    currentIndex = nextIndex;
+    current = orderedPlayers[currentIndex];
+    state.currentPlayerIndex = currentIndex;
+    if (current) {
+      state.gameBoard.currentPlayerId = current._id.toString();
+    }
+    state.gameBoard.diceValue = null;
+    state.gameBoard.validMoves = [];
+    state.gameBoard.lastRollAt = null;
+  } else {
+    state.currentPlayerIndex = currentIndex;
+    if (!state.gameBoard.currentPlayerId) state.gameBoard.currentPlayerId = current._id.toString();
+  }
+
+  return { currentIndex, current };
+};
+
 /* ============================================================
    ROOM LIFECYCLE
 ============================================================ */
@@ -488,13 +523,20 @@ export async function rollDice(req: Request, res: Response) {
       const state = await gameStateCache.getState(roomId, room.toObject());
       if (!state) throw new Error("STATE_NOT_FOUND");
 
-      const currentIndex = getCurrentIndex(
+      let currentIndex = getCurrentIndex(
         { currentPlayerIndex: state.currentPlayerIndex, gameBoard: state.gameBoard },
         orderedPlayers
       );
-      const current = orderedPlayers[currentIndex];
-      state.currentPlayerIndex = currentIndex;
-      if (!state.gameBoard.currentPlayerId) state.gameBoard.currentPlayerId = current._id.toString();
+      let current = orderedPlayers[currentIndex];
+      if (room.settings.mode !== "team") {
+        const normalized = normalizeCurrentTurnForIndividual(state, orderedPlayers);
+        currentIndex = normalized.currentIndex;
+        current = normalized.current;
+      } else {
+        state.currentPlayerIndex = currentIndex;
+        if (!state.gameBoard.currentPlayerId) state.gameBoard.currentPlayerId = current._id.toString();
+      }
+      if (!current) throw new Error("STATE_NOT_FOUND");
 
       if (current.userId.toString() !== userIdStr) {
         if (PERF_DEBUG) {
@@ -772,13 +814,20 @@ export async function advanceTurn(req: Request, res: Response) {
       const state = await gameStateCache.getState(roomId, room.toObject());
       if (!state) throw new Error("STATE_NOT_FOUND");
 
-      const currentIndex = getCurrentIndex(
+      let currentIndex = getCurrentIndex(
         { currentPlayerIndex: state.currentPlayerIndex, gameBoard: state.gameBoard },
         orderedPlayers
       );
-      const current = orderedPlayers[currentIndex];
-      state.currentPlayerIndex = currentIndex;
-      if (!state.gameBoard.currentPlayerId) state.gameBoard.currentPlayerId = current._id.toString();
+      let current = orderedPlayers[currentIndex];
+      if (room.settings.mode !== "team") {
+        const normalized = normalizeCurrentTurnForIndividual(state, orderedPlayers);
+        currentIndex = normalized.currentIndex;
+        current = normalized.current;
+      } else {
+        state.currentPlayerIndex = currentIndex;
+        if (!state.gameBoard.currentPlayerId) state.gameBoard.currentPlayerId = current._id.toString();
+      }
+      if (!current) throw new Error("STATE_NOT_FOUND");
       if (current.userId.toString() !== userIdStr) {
         if (PERF_DEBUG) {
           console.warn("[turn-mismatch][advanceTurn]", {
@@ -905,13 +954,20 @@ export async function makeMove(req: Request, res: Response) {
       const state = await gameStateCache.getState(roomId, room.toObject());
       if (!state) throw new Error("STATE_NOT_FOUND");
 
-      const currentIndex = getCurrentIndex(
+      let currentIndex = getCurrentIndex(
         { currentPlayerIndex: state.currentPlayerIndex, gameBoard: state.gameBoard },
         orderedPlayers
       );
-      const current = orderedPlayers[currentIndex];
-      state.currentPlayerIndex = currentIndex;
-      if (!state.gameBoard.currentPlayerId) state.gameBoard.currentPlayerId = current._id.toString();
+      let current = orderedPlayers[currentIndex];
+      if (room.settings.mode !== "team") {
+        const normalized = normalizeCurrentTurnForIndividual(state, orderedPlayers);
+        currentIndex = normalized.currentIndex;
+        current = normalized.current;
+      } else {
+        state.currentPlayerIndex = currentIndex;
+        if (!state.gameBoard.currentPlayerId) state.gameBoard.currentPlayerId = current._id.toString();
+      }
+      if (!current) throw new Error("STATE_NOT_FOUND");
 
       if (current.userId.toString() !== userIdStr) {
         if (PERF_DEBUG) {
@@ -1030,14 +1086,21 @@ export async function makeMove(req: Request, res: Response) {
       }
 
       if (mergedCaptured.length > 0) {
-        const capturedVictimIds = Array.from(
-          new Set(
+        const capturedVictims = Array.from(
+          new Map(
             mergedCaptured
-              .map((c) => orderedPlayers.find((p) => p.color === c.color)?._id?.toString())
-              .filter((value): value is string => !!value)
-          )
+              .map((c) => {
+                const victim = orderedPlayers.find((p) => p.color === c.color);
+                if (!victim?._id) return null;
+                return [
+                  victim._id.toString(),
+                  { playerId: victim._id.toString(), color: c.color },
+                ] as const;
+              })
+              .filter((entry): entry is readonly [string, { playerId: string; color: PlayerColor }] => !!entry)
+          ).values()
         );
-        await reportCaptureOutcome(roomId, current._id.toString(), capturedVictimIds);
+        await reportCaptureOutcome(roomId, current._id.toString(), current.color, capturedVictims);
       }
 
       state.gameBoard.tokens = workingTokens;
@@ -1055,11 +1118,13 @@ export async function makeMove(req: Request, res: Response) {
       state.gameBoard.lastRollAt = null;
 
       const earnedExtraTurn = diceValue === 6 || !!capturedToken || reachedHomeThisMove;
-      const gameCompleted = hasWon && state.gameBoard.winners.length >= room.settings.maxPlayers;
+      const gameCompleted = state.gameBoard.winners.length >= orderedPlayers.length;
+      const shouldGrantExtraTurn =
+        earnedExtraTurn && !(room.settings.mode !== "team" && hasWon);
       if (gameCompleted) {
         state.status = "completed";
         state.gameBoard.gameLog.push("Game Over! All players finished.");
-      } else if (earnedExtraTurn) {
+      } else if (shouldGrantExtraTurn) {
         state.gameBoard.gameLog.push(`${current.displayName || "Player"} earned an extra turn!`);
       } else {
         state.currentPlayerIndex = advanceGameTurn(
@@ -1175,7 +1240,7 @@ export async function makeMove(req: Request, res: Response) {
         capturedTokens: mergedCaptured,
         effectiveDice,
         movingTokenIds,
-        earnedExtraTurn,
+        earnedExtraTurn: shouldGrantExtraTurn,
         gameCompleted,
         tauntEvents,
         tauntSnapshot: {

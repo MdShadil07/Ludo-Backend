@@ -1,5 +1,6 @@
 import { DEFAULT_ENGAGEMENT_TUNING } from "./tuning";
 import { engagementStateCache } from "./engagementStateCache";
+import { PlayerColor } from "../../config/ludoConfigBackend";
 
 type PlayerMomentumState = {
   updatedAt: number;
@@ -9,6 +10,7 @@ type PlayerMomentumState = {
   turnsAllTokensInBase: number;
   powerRollCharges: number;
   revengeArmedTurns: number;
+  revengeTargetColors: PlayerColor[];
   luckDelta: number;
   totalRolls: number;
   lastForcedRollAt: number;
@@ -23,6 +25,7 @@ export type MomentumSnapshot = {
   turnsAllTokensInBase: number;
   powerRollCharges: number;
   revengeArmedTurns: number;
+  revengeTargetColors: PlayerColor[];
   repeatedValue: number | null;
   repeatCount: number;
   recentLowRollPatternScore: number;
@@ -51,6 +54,7 @@ const createInitialState = (): PlayerMomentumState => ({
     turnsAllTokensInBase: 0,
     powerRollCharges: 0,
     revengeArmedTurns: 0,
+    revengeTargetColors: [],
     luckDelta: 0,
     totalRolls: 0,
     lastForcedRollAt: -999,
@@ -69,6 +73,9 @@ const ensureState = async (roomId: string, playerId: string): Promise<PlayerMome
     turnsAllTokensInBase: Number(existing.turnsAllTokensInBase || 0),
     powerRollCharges: Number(existing.powerRollCharges || 0),
     revengeArmedTurns: Number(existing.revengeArmedTurns || 0),
+    revengeTargetColors: Array.isArray(existing.revengeTargetColors)
+      ? (existing.revengeTargetColors as PlayerColor[])
+      : [],
     luckDelta: Number(existing.luckDelta || 0),
     totalRolls: Number(existing.totalRolls || 0),
     lastForcedRollAt: Number(existing.lastForcedRollAt ?? -999),
@@ -117,6 +124,7 @@ export const getMomentumSnapshot = async (roomId: string, playerId: string): Pro
     turnsAllTokensInBase: state.turnsAllTokensInBase,
     powerRollCharges: state.powerRollCharges,
     revengeArmedTurns: state.revengeArmedTurns,
+    revengeTargetColors: [...state.revengeTargetColors],
     repeatedValue: repeat.repeatedValue,
     repeatCount: repeat.repeatCount,
     recentLowRollPatternScore: computeLowRollPattern(state.recentRolls),
@@ -150,6 +158,9 @@ export const recordRollOutcome = async (roomId: string, playerId: string, input:
   state.turnsAllTokensInBase =
     input.allInBase && input.rolledValue !== 6 ? state.turnsAllTokensInBase + 1 : 0;
   state.revengeArmedTurns = Math.max(0, state.revengeArmedTurns - 1);
+  if (state.revengeArmedTurns === 0) {
+    state.revengeTargetColors = [];
+  }
   state.recentlyKilledTurns = Math.max(0, state.recentlyKilledTurns - 1);
   const sessionPressureDelta =
     (state.noMoveStreak >= 2 ? 0.7 : 0) +
@@ -168,7 +179,8 @@ export const recordRollOutcome = async (roomId: string, playerId: string, input:
 export const recordCaptureEvent = async (
   roomId: string,
   attackerPlayerId: string,
-  victimPlayerIds: string[]
+  attackerColor: PlayerColor,
+  victims: Array<{ playerId: string; color: PlayerColor }>
 ) => {
   const attacker = await ensureState(roomId, attackerPlayerId);
   attacker.powerRollCharges = Math.min(
@@ -178,17 +190,20 @@ export const recordCaptureEvent = async (
   attacker.updatedAt = Date.now();
   await engagementStateCache.setMomentum(roomId, attackerPlayerId, attacker);
 
-  for (const victimPlayerId of victimPlayerIds) {
-    const victim = await ensureState(roomId, victimPlayerId);
+  for (const victimInfo of victims) {
+    const victim = await ensureState(roomId, victimInfo.playerId);
     victim.revengeArmedTurns = Math.max(
       victim.revengeArmedTurns,
       DEFAULT_ENGAGEMENT_TUNING.drama.revengeWindowTurns
+    );
+    victim.revengeTargetColors = Array.from(
+      new Set([...victim.revengeTargetColors, attackerColor])
     );
     victim.recentlyKilledTurns = Math.max(
       victim.recentlyKilledTurns,
       DEFAULT_ENGAGEMENT_TUNING.tiltProtection.recentDeathTurns
     );
     victim.updatedAt = Date.now();
-    await engagementStateCache.setMomentum(roomId, victimPlayerId, victim);
+    await engagementStateCache.setMomentum(roomId, victimInfo.playerId, victim);
   }
 };

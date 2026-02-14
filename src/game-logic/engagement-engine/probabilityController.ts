@@ -1,4 +1,5 @@
 import { DiceContext } from "./contextAnalyzer";
+import { StoryPhase } from "./engagementStateCache";
 import { MomentumSnapshot } from "./momentumTracker";
 import { RankContext } from "./rankingCalculator";
 import { DEFAULT_ENGAGEMENT_TUNING, EngagementTuning, clamp } from "./tuning";
@@ -13,6 +14,7 @@ type ProbabilityOptions = {
   allowForce?: boolean;
   tuning?: EngagementTuning;
   urgency?: number;
+  storyPhase?: StoryPhase;
 };
 
 const normalizeWithEntropyFloor = (weights: number[], floor: number) => {
@@ -52,6 +54,7 @@ export const buildProbabilityModel = (
   const hasPlayable = playable.size > 0;
   const allowForce = options?.allowForce !== false;
   const urgency = clamp(options?.urgency ?? 0, 0, 1);
+  const storyPhase = options?.storyPhase || "start";
   const randNoise = () =>
     tuning.entropyNoise.min + Math.random() * (tuning.entropyNoise.max - tuning.entropyNoise.min);
 
@@ -153,6 +156,123 @@ export const buildProbabilityModel = (
     for (const face of context.killFaces) {
       weights[face - 1] *= killPressure;
     }
+  }
+
+  // Kill exchange memory: if A killed B recently, bias B toward threatening A soon.
+  if (momentum.revengeArmedTurns > 0 && context.revengeTargetKillFaces.size > 0) {
+    const revengeBoost = 1.18 + Math.min(0.18, momentum.revengeArmedTurns * 0.05);
+    for (const face of context.revengeTargetKillFaces) {
+      weights[face - 1] *= revengeBoost;
+    }
+  }
+
+  // Outcome director: push pressure specifically toward current leaders, not random kills.
+  if (context.leaderKillFaces.size > 0) {
+    const leaderKillBoost =
+      (rank.behindGap > 0 ? 1.28 : 1.14) *
+      (rank.closeChase ? 1.08 : 1) *
+      (momentum.revengeArmedTurns > 0 ? 1.06 : 1);
+    for (const face of context.leaderKillFaces) {
+      weights[face - 1] *= leaderKillBoost;
+    }
+  }
+  if (context.leaderPressureFaces.size > 0) {
+    const pressureBoost = rank.behindGap > 0 ? 1.14 : 1.06;
+    for (const face of context.leaderPressureFaces) {
+      weights[face - 1] *= pressureBoost;
+    }
+  }
+
+  // Outcome director: make trailing/tilted players survive long enough to stay engaged.
+  if (context.escapeFaces.size > 0) {
+    const underPressure = rank.isLast || momentum.noMoveStreak >= 2 || momentum.recentlyKilledTurns > 0;
+    const escapeBoost = underPressure ? 1.24 : 1.1;
+    for (const face of context.escapeFaces) {
+      weights[face - 1] *= escapeBoost;
+    }
+    if (underPressure && hasPlayable) {
+      for (const face of playable) {
+        if (context.escapeFaces.has(face)) continue;
+        weights[face - 1] *= 0.96;
+      }
+    }
+  }
+
+  // 9) Anti Snowball Protection:
+  // leaders should feel heat: less comfort, more exposure to chases/counters.
+  if (rank.isLeader) {
+    const pressureIntensity = clamp(rank.leadGap / 90, 0.05, 0.26);
+    const comfortNerf = 1 - pressureIntensity;
+    // Reduce "comfortable drift" outcomes for leader.
+    weights[5] *= comfortNerf;
+    weights[4] *= 1 - pressureIntensity * 0.72;
+    weights[3] *= 1 - pressureIntensity * 0.35;
+    // Push leader toward tactical conflict windows instead of cruising.
+    if (context.leaderPressureFaces.size > 0) {
+      for (const face of context.leaderPressureFaces) {
+        weights[face - 1] *= 1.08 + pressureIntensity * 0.5;
+      }
+    }
+    if (context.escapeFaces.size > 0) {
+      // Leader gets less guaranteed safety.
+      for (const face of context.escapeFaces) {
+        weights[face - 1] *= 0.95;
+      }
+    }
+  }
+
+  // 10) Last Place Hope Engine:
+  // always preserve believable comeback opportunities for retention.
+  if (rank.isLast) {
+    const hopeBoost = clamp(1.16 + rank.behindRatio * 0.22, 1.16, 1.34);
+    if (hasPlayable) {
+      for (const face of playable) {
+        weights[face - 1] *= hopeBoost;
+      }
+    }
+    for (const face of context.escapeFaces) {
+      weights[face - 1] *= 1.2;
+    }
+    for (const face of context.leaderPressureFaces) {
+      weights[face - 1] *= 1.16;
+    }
+    for (const face of context.leaderKillFaces) {
+      weights[face - 1] *= 1.18;
+    }
+    // Reduce dead-end low rolls a bit when last place is under pressure.
+    weights[0] *= 0.88;
+    weights[1] *= 0.92;
+  }
+
+  // Global match story curve director.
+  if (storyPhase === "spread") {
+    weights[0] *= 0.95;
+    weights[1] *= 0.98;
+    if (hasPlayable) {
+      for (const face of playable) weights[face - 1] *= 1.05;
+    }
+  } else if (storyPhase === "fights") {
+    for (const face of context.killFaces) weights[face - 1] *= 1.14;
+    for (const face of context.leaderPressureFaces) weights[face - 1] *= 1.1;
+  } else if (storyPhase === "leader") {
+    if (!rank.isLeader) {
+      for (const face of context.leaderPressureFaces) weights[face - 1] *= 1.18;
+    } else {
+      for (const face of context.escapeFaces) weights[face - 1] *= 0.94;
+    }
+  } else if (storyPhase === "hope") {
+    if (!rank.isLeader) {
+      for (const face of context.escapeFaces) weights[face - 1] *= 1.14;
+      for (const face of context.leaderKillFaces) weights[face - 1] *= 1.12;
+    }
+  } else if (storyPhase === "chaos") {
+    for (const face of context.killFaces) weights[face - 1] *= 1.18;
+    for (const face of context.escapeFaces) weights[face - 1] *= 1.09;
+    weights[0] *= 1.05;
+    weights[5] *= 1.08;
+  } else if (storyPhase === "finish") {
+    for (const face of context.finishFaces) weights[face - 1] *= 1.16;
+    for (const face of context.killFaces) weights[face - 1] *= 1.12;
   }
 
   // Token spread awareness.

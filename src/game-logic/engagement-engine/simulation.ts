@@ -21,6 +21,10 @@ export const runDiceSimulation = (iterations = 10000) => {
       {
         playableFaces: new Set([randomFloor(1, 6), randomFloor(1, 6)]),
         killFaces: new Set<number>(),
+        revengeTargetKillFaces: new Set<number>(),
+        leaderKillFaces: new Set<number>(),
+        leaderPressureFaces: new Set<number>(),
+        escapeFaces: new Set<number>(),
         finishFaces: new Set<number>(),
         behindBySteps: randomFloor(0, 40),
         totalControlledTokens,
