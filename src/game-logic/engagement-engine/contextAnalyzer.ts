@@ -7,6 +7,9 @@ export type DiceContext = {
   killFaces: Set<number>;
   finishFaces: Set<number>;
   behindBySteps: number;
+  totalControlledTokens: number;
+  baseTokenCount: number;
+  allInBase: boolean;
 };
 
 const sumSteps = (tokens: Token[]) => tokens.reduce((acc, t) => acc + Math.max(-1, t.steps), 0);
@@ -25,6 +28,9 @@ export const analyzeDiceContext = (
   const finishFaces = new Set<number>();
   const allTokens = state.gameBoard.tokens;
   const myTokens = controlledColors.flatMap((color) => allTokens[color] || []);
+  const totalControlledTokens = myTokens.length;
+  const baseTokenCount = myTokens.filter((token) => token.status === "base").length;
+  const allInBase = totalControlledTokens > 0 && baseTokenCount === totalControlledTokens;
 
   for (let face = 1; face <= 6; face++) {
     const validMoves = findValidMoves(allTokens, playerColor, face, gameConfig, controlledColors);
@@ -64,5 +70,8 @@ export const analyzeDiceContext = (
     killFaces,
     finishFaces,
     behindBySteps: Math.max(0, maxOther - myScore),
+    totalControlledTokens,
+    baseTokenCount,
+    allInBase,
   };
 };

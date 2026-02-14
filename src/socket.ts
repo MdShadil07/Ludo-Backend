@@ -1,5 +1,6 @@
 import { Server } from "socket.io";
-import { registerMessageSocketHandlers } from "./messages/messageSocket";
+import { registerMessageRealtime } from "./modules/messages/registerMessageRealtime";
+import { registerRoomRealtime } from "./modules/rooms/registerRoomRealtime";
 
 let io: Server | null = null;
 const SOCKET_DEBUG = process.env.SOCKET_DEBUG === "true";
@@ -13,27 +14,8 @@ export const initSocket = (server: any, corsOrigin: string) => {
   });
 
   io.on("connection", socket => {
-    registerMessageSocketHandlers(io as Server, socket);
-
-    socket.on("room:join", (roomId: string) => {
-      if (roomId) socket.join(roomId);
-    });
-    socket.on("room:leave", (roomId: string) => {
-      if (roomId) socket.leave(roomId);
-    });
-    socket.on("room:chat", (payload: any) => {
-      const roomId = typeof payload?.roomId === "string" ? payload.roomId : "";
-      const message = typeof payload?.message === "string" ? payload.message.trim() : "";
-      if (!roomId || !message) return;
-      io?.to(roomId).emit("room:chat", {
-        roomId,
-        userId: String(payload?.userId || ""),
-        displayName: String(payload?.displayName || "Player"),
-        avatarUrl: payload?.avatarUrl || "",
-        message,
-        ts: Date.now(),
-      });
-    });
+    registerMessageRealtime(io as Server, socket);
+    registerRoomRealtime(io as Server, socket);
   });
 
   return io;

@@ -31,23 +31,43 @@ export const buildDiceWeights = (context: DiceContext, streak: StreakSnapshot): 
   for (let face = 1; face <= 6; face++) {
     const idx = face - 1;
 
-    if (hasPlayable && playable.has(face)) weights[idx] *= 1.08;
-    if (hasPlayable && !playable.has(face)) weights[idx] *= 0.9;
-    if (kill.has(face)) weights[idx] *= 1.12;
-    if (finish.has(face)) weights[idx] *= 1.1;
+    if (hasPlayable && playable.has(face)) weights[idx] *= 1.22;
+    if (hasPlayable && !playable.has(face)) weights[idx] *= 0.78;
+    if (kill.has(face)) weights[idx] *= 1.25;
+    if (finish.has(face)) weights[idx] *= 1.22;
   }
 
-  // No-dead-turn safety: if player is stuck, lightly boost playable outcomes.
+  // No-dead-turn safety: if player is stuck, boost playable outcomes.
   if (hasPlayable && streak.noMoveStreak >= 2) {
-    const boost = clamp(1 + streak.noMoveStreak * 0.08, 1.08, 1.3);
+    const boost = clamp(1 + streak.noMoveStreak * 0.12, 1.15, 1.75);
     for (const face of playable) {
       weights[face - 1] *= boost;
     }
   }
 
-  // Comeback balancing (subtle): small boost if significantly behind.
+  // Base-break balancing: heavily reduce "all tokens stuck in base" frustration.
+  if (context.allInBase) {
+    const boostSix = clamp(1.9 + streak.noMoveStreak * 0.35, 2, 4.2);
+    weights[5] *= boostSix;
+    weights[0] *= 0.82;
+    weights[1] *= 0.88;
+  } else if (context.baseTokenCount > 0 && context.totalControlledTokens > 0) {
+    const baseRatio = context.baseTokenCount / context.totalControlledTokens;
+    const boostSix = clamp(1 + baseRatio * 0.55 + streak.noMoveStreak * 0.06, 1.05, 1.55);
+    weights[5] *= boostSix;
+  }
+
+  // Tempo bias: when no tactical opportunities are present, lean toward faster board progression.
+  if (hasPlayable && kill.size === 0 && finish.size === 0) {
+    for (const face of playable) {
+      if (face >= 4) weights[face - 1] *= 1.1;
+      else if (face <= 2) weights[face - 1] *= 0.94;
+    }
+  }
+
+  // Comeback balancing: moderate boost if significantly behind.
   if (hasPlayable && context.behindBySteps > 0) {
-    const behindBoost = clamp(1 + context.behindBySteps / 220, 1, 1.12);
+    const behindBoost = clamp(1 + context.behindBySteps / 160, 1, 1.22);
     for (const face of playable) {
       weights[face - 1] *= behindBoost;
     }
@@ -58,4 +78,3 @@ export const buildDiceWeights = (context: DiceContext, streak: StreakSnapshot): 
 
   return { weights, normalized };
 };
-

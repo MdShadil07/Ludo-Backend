@@ -18,3 +18,5 @@ services:
         value: 7d
       - key: CORS_ORIGIN
         sync: false
+      - key: ALLOW_LOCALHOST_ORIGINS
+        value: "false"

@@ -8,6 +8,10 @@ if (!JWT_SECRET && process.env.NODE_ENV === 'production') {
   throw new Error('JWT_SECRET environment variable is required in production');
 }
 
+if (process.env.NODE_ENV === 'production' && JWT_SECRET && JWT_SECRET.length < 32) {
+  throw new Error('JWT_SECRET must be at least 32 characters in production');
+}
+
 const JWT_SECRET_VALUE = JWT_SECRET || 'dev_only_jwt_secret_change_me';
 
 export function generateToken(userId: Types.ObjectId): string {

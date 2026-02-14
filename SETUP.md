@@ -15,7 +15,8 @@
    - `JWT_EXPIRY`: Token expiry duration (default: `7d`)
    - `PORT`: Server port (default: `5000`)
    - `NODE_ENV`: Environment (default: `development`)
-   - `CORS_ORIGIN`: Frontend URL (default: `http://localhost:5173`)
+   - `CORS_ORIGIN`: Frontend URL(s), comma-separated. Example: `https://your-frontend-domain.com,http://localhost:8081`
+   - `ALLOW_LOCALHOST_ORIGINS`: Allow local dev origins (`localhost` / `127.0.0.1`) in CORS (default: `true`)
 
 3. **Install Dependencies**:
    ```bash
@@ -50,6 +51,8 @@
 - `POST /join` - Join a room by code (requires auth)
   - Body: `{ code }`
 - `GET /:roomId` - Get room details
+- `GET /:roomId/teams` - Get persisted team snapshots (requires auth)
+- `GET /:roomId/events` - Get persisted room/game events (requires auth)
 - `DELETE /:roomId` - Leave a room (requires auth)
 
 ## Database Models
@@ -86,8 +89,35 @@
 - `userId`: ObjectId (ref: User)
 - `color`: String
 - `position`: Number (optional)
+- `teamIndex`: Number | null (derived team partition in team mode)
 - `status`: String ('waiting' | 'playing' | 'finished')
 - `createdAt`: Date
 - `updatedAt`: Date
 
 Unique index: `{ roomId, userId }`
+Additional indexes:
+- `{ roomId, position }`
+- `{ roomId, teamIndex }`
+- `{ roomId, ready }`
+
+### RoomTeam Collection
+- `roomId`: ObjectId (ref: Room)
+- `teamIndex`: Number
+- `name`: String
+- `slotIndexes`: Number[]
+- `members`: Snapshot array with `roomPlayerId`, `userId`, `displayName`, `color`, `position`
+
+Unique index: `{ roomId, teamIndex }`
+
+### GameEvent Collection
+- `roomId`: ObjectId (ref: Room)
+- `type`: String (`room:*`, `game:*`, `dice:roll`, `move`, `turn:advance`, etc.)
+- `actorUserId`: ObjectId | null
+- `actorRoomPlayerId`: ObjectId | null
+- `revision`: Number
+- `payload`: Mixed (event details)
+- `createdAt` / `updatedAt`: Date
+
+Indexes:
+- `{ roomId, createdAt: -1 }`
+- `{ roomId, type, createdAt: -1 }`

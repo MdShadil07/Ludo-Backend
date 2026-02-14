@@ -23,8 +23,23 @@ export function findValidMoves(
     new Set((controllableColors && controllableColors.length ? controllableColors : [currentPlayerColor]))
   );
   const controlledSet = new Set(controlledColors);
+  const teamBlockadeRulesEnabled = controlledSet.size > 1;
   const trackLength = TRACK_COORDS.length;
   const rotationThreshold = Math.max(1, trackLength - 2);
+
+  const hasEnemyBlockadeAt = (position: number, alliedSet: Set<PlayerColor>) => {
+    for (const enemyColor in tokens) {
+      if (alliedSet.has(enemyColor as PlayerColor)) continue;
+      const enemyTokens = tokens[enemyColor as PlayerColor] || [];
+      const count = enemyTokens.filter((t) => {
+        const inTrack = typeof t.position === "number" && t.position >= 0 && t.position < 52;
+        const inPlay = t.status === "active" || t.status === "safe";
+        return inTrack && inPlay && t.position === position;
+      }).length;
+      if (count >= 2) return true;
+    }
+    return false;
+  };
 
   for (const color of controlledColors) {
     const playerTokens = tokens[color] || [];
@@ -39,49 +54,63 @@ export function findValidMoves(
     for (const token of playerTokens) {
     if (token.status === "home") continue;
 
+    const tokenOnTrack =
+      typeof token.position === "number" &&
+      token.position >= 0 &&
+      token.position < 52 &&
+      (token.status === "active" || token.status === "safe");
+    const stackedCount = tokenOnTrack
+      ? playerTokens.filter((t) => {
+          const onTrack =
+            typeof t.position === "number" &&
+            t.position >= 0 &&
+            t.position < 52 &&
+            (t.status === "active" || t.status === "safe");
+          return onTrack && t.position === token.position;
+        }).length
+      : 1;
+    const forcedStackMove =
+      tokenOnTrack && stackedCount >= 2 && !SAFE_INDICES.includes(token.position);
+    if (forcedStackMove && diceValue % 2 !== 0) continue;
+    const effectiveDice = forcedStackMove ? diceValue / 2 : diceValue;
+    if (effectiveDice < 1) continue;
+
     // --- TOKEN IN BASE ---
     if (token.status === "base") {
       if (diceValue === 6) result.push({ id: token.id, color: token.color });
       continue;
     }
 
-    const newSteps = token.steps + diceValue;
+    const newSteps = token.steps + effectiveDice;
 
     if (token.position >= 52) {
       const currentHomeIndex = token.position - 52;
-      if (currentHomeIndex + diceValue > homeCellCount) continue;
+      if (currentHomeIndex + effectiveDice > homeCellCount) continue;
       result.push({ id: token.id, color: token.color });
       continue;
     }
 
+    const movingStackCount = playerTokens.filter((t) => {
+      const inTrack = typeof t.position === "number" && t.position >= 0 && t.position < 52;
+      const inPlay = t.status === "active" || t.status === "safe";
+      return inTrack && inPlay && t.position === token.position;
+    }).length;
+    const canBreakOrCrossBlockade = movingStackCount >= 2;
+
     const canContinueOnTrack = (() => {
       if (token.position >= 52) return false;
-      const newPos = (token.position + diceValue) % trackLength;
-
-      if (!SAFE_INDICES.includes(newPos)) {
-        let blocked = false;
-
-        for (const enemyColor in tokens) {
-          if (controlledSet.has(enemyColor as PlayerColor)) continue;
-
-          const enemies = tokens[enemyColor as PlayerColor];
-          const count = enemies.filter(
-            (t) => t.position === newPos && t.status === "active"
-          ).length;
-
-          if (count >= 2) {
-            blocked = true;
-            break;
-          }
+      for (let step = 1; step <= effectiveDice; step += 1) {
+        const stepPos = (token.position + step) % trackLength;
+        if (SAFE_INDICES.includes(stepPos)) continue;
+        if (teamBlockadeRulesEnabled && hasEnemyBlockadeAt(stepPos, controlledSet) && !canBreakOrCrossBlockade) {
+          return false;
         }
-
-        if (blocked) return false;
       }
       if (entryIndexAdjusted !== -1) {
         const distanceToArrow = (entryIndexAdjusted - token.position + trackLength) % trackLength;
         const completesLapAtArrow = token.steps + distanceToArrow >= rotationThreshold;
-        if (completesLapAtArrow && diceValue > distanceToArrow) {
-          const overshoot = diceValue - distanceToArrow;
+        if (completesLapAtArrow && effectiveDice > distanceToArrow) {
+          const overshoot = effectiveDice - distanceToArrow;
           const canEnter = overshoot >= 1 && overshoot <= homeCellCount + 1;
           if (canEnter) return false;
         }
@@ -95,8 +124,15 @@ export function findValidMoves(
       const distanceToArrow = (entryIndexAdjusted - token.position + trackLength) % trackLength;
       const completesLapAtArrow = token.steps + distanceToArrow >= rotationThreshold;
       if (!completesLapAtArrow) return false;
-      if (diceValue <= distanceToArrow) return false;
-      const overshoot = diceValue - distanceToArrow;
+      if (effectiveDice <= distanceToArrow) return false;
+      for (let step = 1; step <= distanceToArrow; step += 1) {
+        const stepPos = (token.position + step) % trackLength;
+        if (SAFE_INDICES.includes(stepPos)) continue;
+        if (teamBlockadeRulesEnabled && hasEnemyBlockadeAt(stepPos, controlledSet) && !canBreakOrCrossBlockade) {
+          return false;
+        }
+      }
+      const overshoot = effectiveDice - distanceToArrow;
       if (overshoot < 1) return false;
       if (overshoot > homeCellCount + 1) return false;
       return true;
@@ -122,12 +158,18 @@ export function applyMove(
   allTokens: Record<PlayerColor, Token[]>,
   enterHome: boolean = true,
   alliedColors?: PlayerColor[]
-): { updatedToken: Token; capturedToken?: { id: number; color: PlayerColor } } {
+): {
+  updatedToken: Token;
+  capturedToken?: { id: number; color: PlayerColor };
+  capturedTokens?: { id: number; color: PlayerColor }[];
+} {
   const updatedToken = { ...currentToken };
   let capturedToken: { id: number; color: PlayerColor } | undefined;
+  let capturedTokens: { id: number; color: PlayerColor }[] | undefined;
   const alliedSet = new Set(
     Array.from(new Set((alliedColors && alliedColors.length ? alliedColors : [playerColor])))
   );
+  const teamBlockadeRulesEnabled = alliedSet.size > 1;
 
   const trackLength = TRACK_COORDS.length;
   const homeCellCount = Math.max(1, gameConfig.HOME_RUNS[playerColor].length - 1);
@@ -139,6 +181,13 @@ export function applyMove(
   const entryIndexAdjusted =
     entryIndex === -1 ? -1 : (entryIndex - 2 + trackLength) % trackLength;
   const rotationThreshold = Math.max(1, trackLength - 2);
+
+  const movingStackCount = (allTokens[playerColor] || []).filter((t) => {
+    const inTrack = typeof t.position === "number" && t.position >= 0 && t.position < 52;
+    const inPlay = t.status === "active" || t.status === "safe";
+    return inTrack && inPlay && t.position === currentToken.position;
+  }).length;
+  const canBreakOrCrossBlockade = movingStackCount >= 2;
 
   // --- OUT OF BASE ---
   if (updatedToken.status === "base") {
@@ -205,17 +254,31 @@ export function applyMove(
       const enemies = allTokens[enemyColor as PlayerColor];
 
       const atPos = enemies.filter(
-        (t) => t.position === newPos && t.status === "active"
+        (t) => t.position === newPos && (t.status === "active" || t.status === "safe")
       );
+
+      if (atPos.length >= 2) {
+        if (teamBlockadeRulesEnabled && !canBreakOrCrossBlockade) {
+          return { updatedToken: currentToken };
+        }
+        if (teamBlockadeRulesEnabled && canBreakOrCrossBlockade) {
+          capturedTokens = atPos.map((t) => ({ id: t.id, color: t.color }));
+          capturedToken = capturedTokens[0];
+          break;
+        }
+        // In non-team mode, keep previous behavior: stacked enemies on a cell are uncapturable.
+        continue;
+      }
 
       if (atPos.length === 1) {
         capturedToken = { id: atPos[0].id, color: atPos[0].color };
+        capturedTokens = [capturedToken];
         break;
       }
     }
   }
 
-  return { updatedToken, capturedToken };
+  return { updatedToken, capturedToken, capturedTokens };
 }
 
 /**

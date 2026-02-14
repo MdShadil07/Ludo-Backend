@@ -19,10 +19,11 @@ cp .env.example .env
 Required for production:
 
 - `MONGODB_URI`
-- `JWT_SECRET`
+- `JWT_SECRET` (minimum 32 chars)
 - `CORS_ORIGIN`
 - `SUPABASE_URL` (required for profile avatar upload)
 - `SUPABASE_SERVICE_ROLE_KEY` (required for profile avatar upload)
+- `ALLOW_LOCALHOST_ORIGINS=false` (recommended for production)
 - `PORT` (optional, defaults to `5000`)
 - `JWT_EXPIRY` (optional, defaults to `7d`)
 - `REDIS_URL` (recommended for low-latency game state + crash recovery)
@@ -45,6 +46,8 @@ Cache debug checks:
 
 - `GET /health` returns `redisConnected`.
 - `GET /api/rooms/:roomId/cache-status` returns in-memory and Redis revisions/state.
+- `GET /api/rooms/:roomId/teams` returns persisted team snapshots (team mode).
+- `GET /api/rooms/:roomId/events?limit=50` returns persisted room/game event history.
 
 ## Local Development
 

@@ -6,6 +6,9 @@ import {
   getRooms,
   getRoomDetails,
   getRoomCacheStatus,
+  getEngagementCacheStatus,
+  getRoomEvents,
+  getRoomTeams,
   updateRoomStatus,   // start game
   advanceTurn,
   rollDice,
@@ -13,6 +16,9 @@ import {
   joinRoom,
   leaveRoom,
   togglePlayerReady,
+  movePlayerSlot,
+  updateTeamNames,
+  updateRoomTuningProfile,
 } from "../controllers/roomController";
 
 const router = Router();
@@ -24,6 +30,9 @@ router.post("/", authMiddleware, createRoom);
 router.get("/", getRooms);
 router.get("/:roomId", getRoomDetails);
 router.get("/:roomId/cache-status", authMiddleware, getRoomCacheStatus);
+router.get("/:roomId/engagement-cache-status", authMiddleware, getEngagementCacheStatus);
+router.get("/:roomId/teams", authMiddleware, getRoomTeams);
+router.get("/:roomId/events", authMiddleware, getRoomEvents);
 
 // Join by room code (preferred)
 router.post("/join", authMiddleware, joinRoom);
@@ -39,6 +48,9 @@ router.post("/:roomId/leave", authMiddleware, leaveRoom);
    PLAYER READY
 ============================================================ */
 router.patch("/:roomId/ready", authMiddleware, togglePlayerReady);
+router.patch("/:roomId/slot", authMiddleware, movePlayerSlot);
+router.patch("/:roomId/team-names", authMiddleware, updateTeamNames);
+router.patch("/:roomId/tuning-profile", authMiddleware, updateRoomTuningProfile);
 
 /* ============================================================
    GAME FLOW

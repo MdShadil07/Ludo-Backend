@@ -15,12 +15,17 @@ const sample = (probs: number[]) => {
 export const runDiceSimulation = (iterations = 10000) => {
   const counts = [0, 0, 0, 0, 0, 0];
   for (let i = 0; i < iterations; i++) {
+    const totalControlledTokens = 4;
+    const baseTokenCount = randomFloor(0, totalControlledTokens);
     const model = buildDiceWeights(
       {
         playableFaces: new Set([randomFloor(1, 6), randomFloor(1, 6)]),
         killFaces: new Set<number>(),
         finishFaces: new Set<number>(),
         behindBySteps: randomFloor(0, 40),
+        totalControlledTokens,
+        baseTokenCount,
+        allInBase: baseTokenCount === totalControlledTokens,
       },
       {
         noMoveStreak: randomFloor(0, 3),
@@ -33,4 +38,3 @@ export const runDiceSimulation = (iterations = 10000) => {
   }
   return counts;
 };
-

@@ -1,5 +1,6 @@
 import mongoose, { Schema, Document, Types } from "mongoose";
 import { PlayerColor, Token } from "../config/ludoConfigBackend";
+import { DEFAULT_ENGAGEMENT_PROFILE, EngagementProfileName } from "../game-logic/engagement-engine/tuning";
 
 /**
  * Player finishing result
@@ -40,6 +41,9 @@ export interface RoomDocument extends Document {
     maxPlayers: number;
     mode: "individual" | "team";
     visibility: "public" | "private";
+    teamNames?: string[];
+    tuningProfile?: EngagementProfileName;
+    tauntMode?: "suggestion" | "hybrid" | "auto";
   };
 
   status: "waiting" | "in_progress" | "completed";
@@ -94,6 +98,20 @@ const roomSchema = new Schema<RoomDocument>(
         type: String,
         enum: ["public", "private"],
         default: "public",
+      },
+      teamNames: {
+        type: [String],
+        default: [],
+      },
+      tuningProfile: {
+        type: String,
+        enum: ["fast_game", "competitive", "casual", "beginner_help", "event_mode"],
+        default: DEFAULT_ENGAGEMENT_PROFILE,
+      },
+      tauntMode: {
+        type: String,
+        enum: ["suggestion", "hybrid", "auto"],
+        default: "hybrid",
       },
     },
 
@@ -160,5 +178,8 @@ const roomSchema = new Schema<RoomDocument>(
     timestamps: true,
   }
 );
+
+roomSchema.index({ "settings.visibility": 1, status: 1, createdAt: -1 });
+roomSchema.index({ hostId: 1, status: 1, createdAt: -1 });
 
 export default mongoose.model<RoomDocument>("Room", roomSchema);
